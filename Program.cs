@@ -1,116 +1,125 @@
-List<Patient> queue = new();
-int lastTicket = 0;
+Console.OutputEncoding = System.Text.Encoding.UTF8;
+var queue = new Registratura();
+var registration = new Registration(queue, new GosReestr(), new Foms(), new Archive());
+var sms = new SmsSender();
+
+if (args.Contains("--compare"))
+{
+    await registration.CompareAsync("21203199850123");
+    return;
+}
 
 while (true)
 {
     Console.WriteLine();
     Console.WriteLine("1 — Встать в очередь | 2 — Вызвать следующего | 3 — Табло");
-    Console.WriteLine("4 — Где я в очереди | 5 — Уйти из очереди | 6 — Без очереди | 0 — Выход");
+    Console.WriteLine("4 — Где я в очереди | 5 — Уйти из очереди | 6 — Без очереди");
+    Console.WriteLine("7 — Направить пациентов без ОМС в платную кассу | 0 — Выход");
     Console.Write("> ");
-
-    switch (Console.ReadLine()?.Trim())
-    {
-        case null:
-        case "0":
-            return;
-        case "1":
-            AddPatient(null);
-            break;
-        case "2":
-            if (queue.Count == 0)
-            {
-                Console.WriteLine("Очередь пуста.");
-                break;
-            }
-
-            Patient next = queue[0];
-            queue.RemoveAt(0);
-            Console.WriteLine($"Талон {next.Ticket}, {next.Name}, пройдите в кабинет.");
-            break;
-        case "3":
-            Console.WriteLine($"В очереди {queue.Count} чел.");
-            foreach (Patient patient in queue)
-            {
-                string priority = patient.Priority is null ? "" : $" ({patient.Priority})";
-                Console.WriteLine($"Талон {patient.Ticket}: {patient.Name}{priority}");
-            }
-            break;
-        case "4":
-            int position = FindTicket();
-            if (position >= 0)
-                Console.WriteLine($"Перед вами {position} чел.");
-            break;
-        case "5":
-            int index = FindTicket();
-            if (index >= 0)
-            {
-                queue.RemoveAt(index);
-                Console.WriteLine("Талон удалён из очереди.");
-            }
-            break;
-        case "6":
-            Console.WriteLine("1 — Ветеран | 2 — Беременная | 3 — Родитель с ребёнком до года");
-            Console.Write("Категория: ");
-            string? category = Console.ReadLine()?.Trim() switch
-            {
-                "1" => "ветеран",
-                "2" => "беременная",
-                "3" => "родитель с ребёнком до года",
-                _ => null
-            };
-
-            if (category is null)
-                Console.WriteLine("Нет такой категории.");
-            else
-                AddPatient(category);
-            break;
-        default:
-            Console.WriteLine("Нет такой команды.");
-            break;
-    }
-}
-
-void AddPatient(string? priority)
-{
-    Console.Write("Имя: ");
-    string? name = Console.ReadLine()?.Trim();
-    if (string.IsNullOrEmpty(name))
-    {
-        Console.WriteLine("Имя должно быть заполнено.");
+    string? command = Console.ReadLine()?.Trim();
+    if (command is null or "0")
         return;
-    }
 
-    Patient patient = new() { Ticket = ++lastTicket, Name = name, Priority = priority };
-    int position = queue.Count;
-    if (priority is null)
+    try
     {
-        queue.Add(patient);
+        switch (command)
+        {
+            case "1":
+                await AddPatientAsync(null);
+                break;
+            case "2":
+                var patient = queue.CallNext();
+                Console.WriteLine($"Талон {patient.Ticket}, {patient.Name}, пройдите в кабинет.");
+                if (queue.Next is { } next)
+                    await sms.SendAsync(next.Phone, "Вы следующий, подойдите к кабинету");
+                break;
+            case "3":
+                Console.WriteLine($"В кабинете: {queue.Current?.Name ?? "никого"}. Следующий: {queue.Next?.Name ?? "никого"}.");
+                foreach (var entry in queue.Queue)
+                {
+                    var waiting = DateTimeOffset.UtcNow - entry.QueuedAt;
+                    Console.WriteLine($"Талон {entry.Ticket}: {entry.Name} | {entry.Priority ?? "обычная очередь"} | ждёт {(int)waiting.TotalMinutes}:{waiting.Seconds:D2}");
+                }
+                break;
+            case "4":
+                if (ReadTicket() is int positionTicket)
+                    Console.WriteLine($"Перед вами {queue.FindTicket(positionTicket)} чел.");
+                break;
+            case "5":
+                if (ReadTicket() is int leaveTicket)
+                {
+                    queue.Leave(leaveTicket);
+                    Console.WriteLine("Талон удалён из очереди.");
+                }
+                break;
+            case "6":
+                Console.WriteLine("1 — Ветеран | 2 — Беременная | 3 — Родитель с ребёнком до года");
+                string? category = Console.ReadLine()?.Trim() switch
+                {
+                    "1" => "Ветеран",
+                    "2" => "Беременная",
+                    "3" => "Родитель с ребёнком до года",
+                    _ => null
+                };
+                if (category is null)
+                    Console.WriteLine("Выберите категорию от 1 до 3.");
+                else
+                    await AddPatientAsync(category);
+                break;
+            case "7":
+                var sent = queue.SendToPaidDesk();
+                foreach (var entry in sent)
+                    Console.WriteLine($"Талон {entry.Ticket}, {entry.Name}: полиса ОМС нет, пройдите в платную кассу.");
+                Console.WriteLine($"Направлено в платную кассу: {sent.Count}.");
+                break;
+            default:
+                Console.WriteLine("Такой команды нет. Выберите номер из меню.");
+                break;
+        }
     }
-    else
+    catch (TicketNotFoundException ex)
     {
-        // Новый льготник встаёт перед первым обычным пациентом.
-        int firstRegular = queue.FindIndex(p => p.Priority is null);
-        if (firstRegular >= 0)
-            position = firstRegular;
-
-        queue.Insert(position, patient);
+        Console.WriteLine(ex.Message);
     }
-
-    Console.WriteLine($"Ваш талон: {patient.Ticket}. Перед вами {position} чел.");
+    catch (EmptyQueueException ex)
+    {
+        Console.WriteLine(ex.Message);
+    }
+    catch (GosReestrUnavailableException ex)
+    {
+        Clock.Log($"{ex.Message} Пациент не добавлен. Повторите попытку позже.");
+    }
+    catch (ArgumentException ex)
+    {
+        Console.WriteLine(command == "2" ? $"SMS не отправлено: {ex.Message}" : ex.Message);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Не удалось выполнить команду. Можно выбрать другую или повторить.");
+        Console.Error.WriteLine(ex);
+    }
+    finally
+    {
+        Console.WriteLine($"[табло] В очереди {queue.Queue.Count} чел.");
+    }
 }
 
-int FindTicket()
+async Task AddPatientAsync(string? priority)
+{
+    Console.Write("ПИН: ");
+    string pin = Console.ReadLine()?.Trim() ?? "";
+    Console.Write("Телефон (можно пропустить): ");
+    string phone = Console.ReadLine()?.Trim() ?? "";
+    var patient = await registration.RegisterAsync(pin, phone, priority);
+    Console.WriteLine($"Ваш талон: {patient.Ticket}. Перед вами {queue.FindTicket(patient.Ticket)} чел.");
+}
+
+static int? ReadTicket()
 {
     Console.Write("Номер талона: ");
-    if (!int.TryParse(Console.ReadLine(), out int ticket) || ticket <= 0)
-    {
-        Console.WriteLine("Введите положительный номер талона.");
-        return -1;
-    }
+    if (int.TryParse(Console.ReadLine(), out int ticket) && ticket > 0)
+        return ticket;
 
-    int index = queue.FindIndex(p => p.Ticket == ticket);
-    if (index == -1)
-        Console.WriteLine("Талон не найден.");
-
-    return index;
+    Console.WriteLine("Введите положительный номер талона цифрами, например 15.");
+    return null;
 }
